@@ -1,0 +1,13 @@
+universe = vanilla
+executable = ./run.sh
+request_cpus = 1
+request_gpus = 1
+gpus_minimum_memory = 16GB
+request_memory = 16GB
+output = .condor_logs/$(Process).out
+error  = .condor_logs/$(Process).err
+log    = .condor_logs/$(Process).log
++CSCI_GrpDesktop = true
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
+arguments = $(args)
+Queue arguments from args.txt

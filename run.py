@@ -1,64 +1,85 @@
-import torch
-import numpy as np
-from deepseek import Agent
+def main():
+    import argparse
 
-# a = agent.Agent()
-# a.train()
-# # a.load_model('best_model.pt')
-# a.dump_val_preds()
+    parser = argparse.ArgumentParser()
 
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+    parser.add_argument('--classes', type=str, default='RED,DWED,PCE', help='Comma separated list of datasets to use')
+    parser.add_argument('--model', type=str, default="deepseek-ai/deepseek-coder-6.7b-base", help='Model name')
+    parser.add_argument('--epoch', type=int, default=10, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay')
+    parser.add_argument('--warmup_steps', type=int, default=0, help='Warmup steps')
+    parser.add_argument('--lora_r', type=int, default=8, help='Lora rank')
+    parser.add_argument('--lora_alpha', type=int, default=32, help='Lora alpha')
+    parser.add_argument('--max_seq_len', type=int, default=2048, help='Max sequence length')
+    parser.add_argument('--device', type=str, default='cuda', help='Device to use')
+    parser.add_argument('--val_interval', type=int, default=1, help='Validation frequency')
+    parser.add_argument('--profile', action='store_true', help='Enable profiling')
+    parser.add_argument('--scheduler', type=str, default='linear', help='Scheduler to use')
+    parser.add_argument('--load', type=str, default=None, help='Path to resume from')
+    parser.add_argument('--infer', action='store_true', help='Run inference only')
 
-torch.random.manual_seed(42)
-np.random.seed(42)
+    args = parser.parse_args()
+    args.classes = args.classes.split(',')
+    assert len(args.classes) > 0, "At least one class must be specified"
 
-a = Agent()
+    if args.infer:
+        infer(args)
+    else:
+        train(args)
 
-for a.epoch in range(a.num_epochs):
-    a.train_one_epoch()
-    a.validate()
+def train(args):
+    import wandb
+    
+    a = Agent(args)
+    wandb.login(key='9291a5186a8cbb6815a7be81e224c73a70504e20')
+    run = wandb.init(project='faultdiagnosis',
+              config={
+                    "model": args.model,
+                    "classes": args.classes,
+                    "epoch": args.epoch,
+                    "batch_size": args.batch_size,
+                    "lr": args.lr,
+                    "weight_decay": args.weight_decay,
+                    "warmup_steps": args.warmup_steps,
+                    "lora_r": args.lora_r,
+                    "lora_alpha": args.lora_alpha,
+                    "max_seq_len": args.max_seq_len,
+                    "device": args.device,
+                    "val_interval": args.val_interval,
+                    "profile": args.profile,
+                    "scheduler": args.scheduler
+                  })
+    a.train()
+    run.finish()
 
-    ax, fig = plt.subplots(1, 2, figsize=(12, 4))
-    ax2 = fig[0].twinx()
-    ax2.plot(a.train_metrics['lr'], color='black', alpha=0.3)
-    ax2.set_ylabel('lr')
-    fig[0].set_xlim(0, a.num_epochs * len(a.train_loader))
-    fig[0].plot(a.train_metrics['loss'], label='train')
-    fig[0].plot(a.val_metrics['loss'], label='val')
-    fig[0].set_title('Loss')
-    fig[0].legend()
+def infer(args):
+    import json
 
-    fig[1].set_xlim(0, a.num_epochs * len(a.train_loader))
-    fig[1].set_ylim(0, 1)
-    # fig[1].plot(list(map(lambda x: x['0']['f1-score'], a.train_metrics['report_dict'])), c='lightred')
-    # fig[1].plot(list(map(lambda x: x['1']['f1-score'], a.train_metrics['report_dict'])), c='red')
-    # fig[1].plot(list(map(lambda x: x['2']['f1-score'], a.train_metrics['report_dict'])), c='darkred')
-    # fig[1].plot(list(map(lambda x: x['0']['f1-score'], a.train_metrics['report_dict'])), c='lightblue')
-    # fig[1].plot(list(map(lambda x: x['1']['f1-score'], a.train_metrics['report_dict'])), c='blue')
-    # fig[1].plot(list(map(lambda x: x['2']['f1-score'], a.train_metrics['report_dict'])), c='darkblue')
-    # fig[1].plot(list(map(lambda x: x['0']['precision'], a.train_metrics['report_dict'])), c='r')
-    # fig[1].plot(list(map(lambda x: x['0']['recall'], a.train_metrics['report_dict'])), c='darkred')
-    # fig[1].plot(list(map(lambda x: x['1']['precision'], a.train_metrics['report_dict'])), c='g')
-    # fig[1].plot(list(map(lambda x: x['1']['recall'], a.train_metrics['report_dict'])), c='darkgreen')
-    # fig[1].plot(list(map(lambda x: x['2']['precision'], a.train_metrics['report_dict'])), c='b')
-    # fig[1].plot(list(map(lambda x: x['2']['recall'], a.train_metrics['report_dict'])), c='darkblue')
-    # fig[1].plot(list(map(lambda x: x['0']['precision'], a.val_metrics['report_dict'])), c='r', linestyle='--')
-    # fig[1].plot(list(map(lambda x: x['0']['recall'], a.val_metrics['report_dict'])), c='darkred', linestyle='--')
-    # fig[1].plot(list(map(lambda x: x['1']['precision'], a.val_metrics['report_dict'])), c='g', linestyle='--')
-    # fig[1].plot(list(map(lambda x: x['1']['recall'], a.val_metrics['report_dict'])), c='darkgreen', linestyle='--')
-    # fig[1].plot(list(map(lambda x: x['2']['precision'], a.val_metrics['report_dict'])), c='b', linestyle='--')
-    # fig[1].plot(list(map(lambda x: x['2']['recall'], a.val_metrics['report_dict'])), c='darkblue', linestyle='--')
-    fig[1].plot(a.train_metrics['acc'], label='train')
-    fig[1].plot(a.val_metrics['acc'], label='val')
-    fig[1].set_title('Accuracy')
-    # lines = [Line2D([0], [0], color='black'), Line2D([0], [0], color='black', linestyle='--'),
-    #         Line2D([0], [0], color='red'), Line2D([0], [0], color='darkred')]
-    # fig[1].legend(lines, ['Train', 'Val', 'Precision', 'Recall'])
-    plt.savefig(f'output/train_val_{a.epoch}.png')
-    plt.close()
+    a = Agent(args)
+    targets = [i['target'] for i in a.val_dataset]
+    texts = [i['text'] for i in a.val_dataset.df]
+    preds, probs = a.predict(a.val_dataset)
+    items = zip(targets, texts, preds, probs)
+    json.dump(list(map(lambda x: {
+        'target': x[0].tolist(),
+        'text': x[1],
+        'pred': x[2].tolist(),
+        'probs': x[3].tolist()
+    }, items)), open('output/predictions.json', 'w'))
 
-    with open(f'output/metrics_train_{a.epoch}.txt', 'w') as f:
-        f.write(str(a.train_metrics))
-    with open(f'output/metrics_val_{a.epoch}.txt', 'w') as f:
-        f.write(str(a.val_metrics))
+if __name__ == "__main__":
+    import os
+    
+    os.environ["HF_HOME"] = os.environ.get("HF_HOME", default="/research/huang/workspaces/hytopot/faultdiagnosis/.hf")
+
+    import torch
+    import numpy as np
+
+    torch.random.manual_seed(42)
+    np.random.seed(42)
+
+    from agent import Agent
+
+    main()

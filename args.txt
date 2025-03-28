@@ -1,0 +1,4 @@
+--epoch 50 --lr 3e-6 --scheduler linear
+--epoch 50 --lr 5e-6 --scheduler linear
+--epoch 50 --lr 7e-6 --scheduler linear
+--epoch 50 --lr 9e-6 --scheduler linear

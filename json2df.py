@@ -12,4 +12,8 @@ with open('multi_combined_data.json', 'r') as f:
         data.append(j)
 df = pd.DataFrame(data).fillna(0)
 print(df.head())
-df.to_pickle('multi_combined_data.pkl')
+
+train_df = df[df['split'] == 'train']
+val_df = df[df['split'] == 'val']
+train_df.to_pickle('train.pkl')
+val_df.to_pickle('val.pkl')
