@@ -18,10 +18,12 @@ from transformers import (
     get_cosine_with_hard_restarts_schedule_with_warmup,
 )
 from peft import (
+    PeftModelForSequenceClassification,
     LoraConfig,
     get_peft_model,
-    prepare_model_for_kbit_training,
+    get_peft_model_state_dict,
     set_peft_model_state_dict,
+    prepare_model_for_kbit_training,
 )
 
 from dataset import HEDataset
@@ -34,13 +36,16 @@ class Agent:
         self.profile = args.profile
         self.args = args
 
-        self.load_or_resume(args, load_path)
+        self.load_or_resume(args)
 
     def save_checkpoint(self, args, path):
         ''' Save the adapter, optimizer, scheduler, dataset and training stats '''
-        self.model.save_pretrained(path)
-        self.train_dataset.save(path)
-        self.val_dataset.save(path)
+        if not os.path.exists(path):
+            os.makedirs(path)
+
+        torch.save(get_peft_model_state_dict(self.model), f"{path}/adapter_model.pt")
+        self.train_dataset.save(f"{path}/train.pkl")
+        self.val_dataset.save(f"{path}/val.pkl")
         torch.save(self.optimizer.state_dict(), f"{path}/optimizer.pt")
         torch.save(self.scheduler.state_dict(), f"{path}/scheduler.pt")
         torch.save(self.epoch, f"{path}/epoch.pt")
@@ -48,16 +53,17 @@ class Agent:
         pickle.dump(self.val_metrics, open(f"{path}/val_metrics.pkl", "wb"))
         pickle.dump(self.args, open(f"{path}/args.pkl", "wb"))
 
-    def load_or_resume(self, args, load_path = ""):
+    def load_or_resume(self, args):
         ''' Initialize tokenizer and base model.
             Load the adapter, optimizer, scheduler, dataset and training stats '''
 
         self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        assert self.tokenizer.model_max_length >= args.max_seq_len, f"Tokenizer max length {self.tokenizer.model_max_length} is less than max_seq_len {args.max_seq_len}"
 
-        self.train_dataset = HEDataset(os.path.join(load_path, 'train.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='train')
-        self.val_dataset = HEDataset(os.path.join(load_path, 'val.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='val')
+        self.train_dataset = HEDataset(os.path.join(args.load, 'train.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='train')
+        self.val_dataset = HEDataset(os.path.join(args.load, 'val.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='val')
         assert self.train_dataset.label_dict.keys() == self.val_dataset.label_dict.keys(), "Train and val datasets should contain the same classes"
         self.train_loader = DataLoader(self.train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
         self.val_loader = DataLoader(self.val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True)
@@ -67,18 +73,17 @@ class Agent:
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
+            # TODO: the classification head should be separate from the base model
+            llm_int8_skip_modules=["classifier", "pre_classifier"] if args.model.find('codebert') != -1 else None,
         )
 
-        # initialize new adapter or load existing
-        lora_config = LoraConfig.from_pretrained(args.model) if load_path else (
-            LoraConfig(
+        lora_config = LoraConfig(
                 r = args.lora_r,
                 lora_alpha = args.lora_alpha,
                 lora_dropout = 0.05,
                 target_modules="all-linear",
                 task_type="SEQ_CLS",
                 inference_mode=False,
-            )
         )
 
         # load pretrained model
@@ -91,8 +96,11 @@ class Agent:
                                                     quantization_config=config,
                                                     pad_token_id=self.tokenizer.pad_token_id,
                                                     use_cache=False)
+        # initialize adapter or load existing
         model = prepare_model_for_kbit_training(model, gradient_checkpointing_kwargs={'use_reentrant': False})
         self.model = get_peft_model(model, lora_config)
+        if args.load:
+            set_peft_model_state_dict(self.model, torch.load(f"{args.load}/adapter_model.pt"))
         self.model.print_trainable_parameters()
 
         # load optimizer, scheduler, metrics
@@ -127,15 +135,12 @@ class Agent:
             case _:
                 raise ValueError(f"Unknown scheduler: {args.scheduler}")
 
-        if load_path:
-            self.optimizer.load_state_dict(torch.load(f"{load_path}/optimizer.pt"))
-            self.scheduler.load_state_dict(torch.load(f"{load_path}/scheduler.pt"))
-            self.epoch = torch.load(f"{load_path}/epoch.pt")
-            self.train_metrics = pickle.load(open(f"{load_path}/train_metrics.pkl", "rb"))
-            self.val_metrics = pickle.load(open(f"{load_path}/val_metrics.pkl", "rb"))
-            args = pickle.load(open(f"{load_path}/args.pkl", "rb"))
-            assert args == self.args, f"Loaded args do not match current args!!\n{args}"
-            self.args = args
+        if args.load:
+            self.optimizer.load_state_dict(torch.load(f"{args.load}/optimizer.pt"))
+            self.scheduler.load_state_dict(torch.load(f"{args.load}/scheduler.pt"))
+            self.epoch = torch.load(f"{args.load}/epoch.pt")
+            self.train_metrics = pickle.load(open(f"{args.load}/train_metrics.pkl", "rb"))
+            self.val_metrics = pickle.load(open(f"{args.load}/val_metrics.pkl", "rb"))
 
     def train(self):
         for self.epoch in range(self.num_epochs):
@@ -152,8 +157,8 @@ class Agent:
                 self.validate()
 
                 if max(self.val_metrics['loss']) == self.val_metrics['loss'][-1]:
-                    self.save_checkpoint(self.args, self.args.output_dir)
-                    print(f"Model saved to {self.args.output_dir}")
+                    self.save_checkpoint(self.args, f'{wandb.run.dir}/checkpoint')
+                    print(f'Best model saved to {wandb.run.dir}/checkpoint')
 
     def train_one_epoch(self):
         self.model.train()
@@ -204,7 +209,6 @@ class Agent:
             losses += [loss.item()]
             accs += [acc]
             tqdm_batch.set_postfix({'loss': np.mean(losses), 'acc': np.mean(accs)})
-            print(classification_report(np.concatenate(all_targets), np.concatenate(all_preds), zero_division=np.nan))
 
         # logging
         self.val_metrics['loss'].append(np.mean(losses))
@@ -238,10 +242,12 @@ class Agent:
 
     def predict(self, input_texts):
         self.model.eval()
-        input_texts = [input_texts] if isinstance(input_texts, str) else input_texts
-        inputs = self.tokenizer(input_texts, padding=True, truncation=True, max_length=self.args.max_seq_len, return_tensors="pt").to(self.device)
         with torch.no_grad():
-            outputs = self.model(**inputs)
-            probs = torch.sigmoid(outputs.logits).cpu().numpy()
-            preds = (probs >= 0.5).astype(int)
+            for text in tqdm(input_texts, desc='Predicting'):
+                output = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
+                input_ids = output['input_ids'].to(self.device)
+                attention_mask = output['attention_mask'].to(self.device)
+                outputs = self.model(input_ids, attention_mask=attention_mask)
+                probs = torch.sigmoid(outputs.logits).cpu().numpy()
+                preds = (probs >= 0.5).astype(int)
         return preds, probs

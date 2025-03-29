@@ -20,6 +20,9 @@ class HEDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
+    def save(self, path):
+        self.df.to_pickle(path)
+
     def preprocess(self, path):
         # TODO: dont hardcode this
         label_incl = list(map(lambda x: ['RED', 'PCE', 'DWED'].index(x), self.classes))

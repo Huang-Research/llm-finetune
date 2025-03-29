@@ -1,5 +1,6 @@
 def main():
-    import argparse
+    import argparse, pickle
+    from pprint import pprint
 
     parser = argparse.ArgumentParser()
 
@@ -17,13 +18,22 @@ def main():
     parser.add_argument('--val_interval', type=int, default=1, help='Validation frequency')
     parser.add_argument('--profile', action='store_true', help='Enable profiling')
     parser.add_argument('--scheduler', type=str, default='linear', help='Scheduler to use')
-    parser.add_argument('--load', type=str, default=None, help='Path to resume from')
+    parser.add_argument('--load', type=str, default="", help='Path to load/resume from')
     parser.add_argument('--infer', action='store_true', help='Run inference only')
 
     args = parser.parse_args()
     args.classes = args.classes.split(',')
     assert len(args.classes) > 0, "At least one class must be specified"
 
+    if args.load:
+        # set default values to the saved arguments
+        last_args = pickle.load(open(f"{args.load}/args.pkl", "rb"))
+        parser.set_defaults(**vars(last_args))
+        # need to reparse to get the new defaults
+        args = parser.parse_args()
+        print("Loaded args:")
+        pprint(vars(args), indent=4, sort_dicts=False)
+    
     if args.infer:
         infer(args)
     else:
@@ -51,6 +61,7 @@ def train(args):
                     "profile": args.profile,
                     "scheduler": args.scheduler
                   })
+
     a.train()
     run.finish()
 
@@ -58,16 +69,19 @@ def infer(args):
     import json
 
     a = Agent(args)
+    
+    print("Predicting...")
     targets = [i['target'] for i in a.val_dataset]
-    texts = [i['text'] for i in a.val_dataset.df]
-    preds, probs = a.predict(a.val_dataset)
+    texts = [i['text'] for _, i in a.val_dataset.df.iterrows()]
+    preds, probs = a.predict(texts)
+    
     items = zip(targets, texts, preds, probs)
     json.dump(list(map(lambda x: {
         'target': x[0].tolist(),
         'text': x[1],
         'pred': x[2].tolist(),
         'probs': x[3].tolist()
-    }, items)), open('output/predictions.json', 'w'))
+    }, items)), open(f'output/predictions.json', 'w'))
 
 if __name__ == "__main__":
     import os
