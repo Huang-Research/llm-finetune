@@ -242,12 +242,15 @@ class Agent:
 
     def predict(self, input_texts):
         self.model.eval()
+        preds, probs = [], []
         with torch.no_grad():
             for text in tqdm(input_texts, desc='Predicting'):
                 output = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
                 input_ids = output['input_ids'].to(self.device)
                 attention_mask = output['attention_mask'].to(self.device)
                 outputs = self.model(input_ids, attention_mask=attention_mask)
-                probs = torch.sigmoid(outputs.logits).cpu().numpy()
-                preds = (probs >= 0.5).astype(int)
+                prob = torch.sigmoid(outputs.logits).cpu().numpy()
+                pred = prob.round()
+                preds.append(pred)
+                probs.append(prob)
         return preds, probs
