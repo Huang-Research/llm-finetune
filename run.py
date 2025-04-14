@@ -4,7 +4,7 @@ def main():
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--classes', type=str, default='RED,DWED,PCE', help='Comma separated list of datasets to use')
+    parser.add_argument('--classes', type=str, default='RED,PCE,DWED', help='Comma separated list of datasets to use')
     parser.add_argument('--model', type=str, default="deepseek-ai/deepseek-coder-6.7b-base", help='Model name')
     parser.add_argument('--epoch', type=int, default=10, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
@@ -14,12 +14,14 @@ def main():
     parser.add_argument('--lora_r', type=int, default=8, help='Lora rank')
     parser.add_argument('--lora_alpha', type=int, default=32, help='Lora alpha')
     parser.add_argument('--max_seq_len', type=int, default=2048, help='Max sequence length')
-    parser.add_argument('--device', type=str, default='cuda', help='Device to use')
+    parser.add_argument('--device', type=str, default='auto', help='Device to use')
     parser.add_argument('--val_interval', type=int, default=1, help='Validation frequency')
     parser.add_argument('--profile', action='store_true', help='Enable profiling')
     parser.add_argument('--scheduler', type=str, default='linear', help='Scheduler to use')
     parser.add_argument('--load', type=str, default="", help='Path to load/resume from')
     parser.add_argument('--infer', action='store_true', help='Run inference only')
+    parser.add_argument('--salience', type=int, help='Index of salience map', default=None)
+    parser.add_argument('--test', action='store_true', help='Run test dataset')
 
     args = parser.parse_args()
     args.classes = args.classes.split(',')
@@ -44,7 +46,7 @@ def train(args):
     
     a = Agent(args)
     wandb.login(key='9291a5186a8cbb6815a7be81e224c73a70504e20')
-    run = wandb.init(project='faultdiagnosis',
+    run = wandb.init(entity='faultdiagnosis', project='faultdiagnosis',
               config={
                     "model": args.model,
                     "classes": args.classes,
@@ -70,23 +72,30 @@ def infer(args):
 
     a = Agent(args)
     
-    print("Predicting...")
     targets = [i['target'] for i in a.val_dataset]
     texts = [i['text'] for _, i in a.val_dataset.df.iterrows()]
-    preds, probs = a.predict(texts)
-    
-    items = zip(targets, texts, preds, probs)
-    json.dump(list(map(lambda x: {
-        'target': x[0].tolist(),
-        'text': x[1],
-        'pred': x[2].tolist(),
-        'probs': x[3].tolist()
-    }, items)), open(f'output/predictions.json', 'w'))
+
+    if args.salience:
+        print("Generating salience...")
+        salience = a.generate_salience(texts[args.salience], targets[args.salience])
+        np.save('output/salience.npy', salience)
+    else:
+        print("Predicting...")
+        text_tokenized, preds, probs, salience = a.predict(texts, targets)
+        
+        items = zip(targets, text_tokenized, preds, probs)
+        json.dump(list(map(lambda x: {
+            'target': x[0].tolist(),
+            'text': x[1],
+            'pred': x[2].tolist(),
+            'probs': x[3].tolist(),
+        }, items)), open(f'output/predictions.json', 'w'))
 
 if __name__ == "__main__":
     import os
     
     os.environ["HF_HOME"] = os.environ.get("HF_HOME", default="/research/huang/workspaces/hytopot/faultdiagnosis/.hf")
+    print(f"HF_HOME set to: {os.environ['HF_HOME']}")  # Debugging line to check HF_HOME path
 
     import torch
     import numpy as np

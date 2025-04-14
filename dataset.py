@@ -40,7 +40,9 @@ class HEDataset(Dataset):
             i: label for i, label in enumerate(self.classes)
         }
 
-        input_ids, att_mask = self.tokenizer(df['text'].to_list(), padding='max_length', max_length=self.max_length, truncation=True, return_tensors='pt').values()
+        output = self.tokenizer(df['text'].to_list(), padding='max_length', max_length=self.max_length, truncation=True, return_tensors='pt')
+        input_ids = output['input_ids']
+        att_mask = output['attention_mask']
 
         label_freqs = df['label'].explode().value_counts().sort_index()
         label_freqs /= label_freqs.sum()
