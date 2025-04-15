@@ -1,0 +1,3 @@
+[submodule "llm2vec"]
+	path = llm2vec
+	url = https://github.com/McGill-NLP/llm2vec
