@@ -12,6 +12,8 @@ from llm2vec.llm2vec.models.bidirectional_llama import LlamaBiModel
 from transformers import (
     LlamaPreTrainedModel,
     AutoModelForSequenceClassification,
+    AutoModel,
+    AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
     get_linear_schedule_with_warmup,
@@ -77,16 +79,16 @@ class Agent:
         ''' Initialize tokenizer and base model.
             Load the adapter, optimizer, scheduler, dataset and training stats '''
 
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         assert self.tokenizer.model_max_length >= args.max_seq_len, f"Tokenizer max length {self.tokenizer.model_max_length} is less than max_seq_len {args.max_seq_len}"
 
-        self.train_dataset = HEDataset(os.path.join(args.load, 'train.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='train')
+        self.train_dataset = HEDataset(os.path.join(args.load, 'train.pkl'), self.tokenizer, args, split='train')
         if args.test:
-            self.val_dataset = HEDataset(os.path.join(args.load, 'test.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='test')
+            self.val_dataset = HEDataset(os.path.join(args.load, 'test.pkl'), self.tokenizer, args, split='test')
         else:
-            self.val_dataset = HEDataset(os.path.join(args.load, 'val.pkl'), self.tokenizer, args.max_seq_len, classes=args.classes, split='val')
+            self.val_dataset = HEDataset(os.path.join(args.load, 'val.pkl'), self.tokenizer, args, split='val')
         assert self.train_dataset.label_dict.keys() == self.val_dataset.label_dict.keys(), "Train and val datasets should contain the same classes"
         self.train_loader = DataLoader(self.train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
         self.val_loader = DataLoader(self.val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True)
@@ -100,56 +102,31 @@ class Agent:
             llm_int8_skip_modules=["classifier", "pre_classifier"] if args.model.find('codebert') != -1 else None,
         )
 
-        # lora_config = LoraConfig(
-        #         r = args.lora_r,
-        #         lora_alpha = args.lora_alpha,
-        #         lora_dropout = 0.05,
-        #         target_modules="all-linear",
-        #         task_type="SEQ_CLS",
-        #         inference_mode=False,
-        # )
-
-        # # load pretrained model
-        # model = AutoModelForSequenceClassification.from_pretrained(args.model,
-        #                                             device_map=args.device,
-        #                                             low_cpu_mem_usage=True,
-        #                                             trust_remote_code=False,
-        #                                             revision="main",
-        #                                             num_labels=len(args.classes),
-        #                                             quantization_config=config,
-        #                                             pad_token_id=self.tokenizer.pad_token_id)
-
-        # # initialize adapter or load existing
-        # model = prepare_model_for_kbit_training(model, gradient_checkpointing_kwargs={'use_reentrant': False})
-        # self.model = get_peft_model(model, lora_config)
-
-        # Loading bidirectional model using LLM2Vec package
-        model = LlamaBiModel.from_pretrained(
-            args.model,
-            # "meta-llama/Llama-3.2-3B",
-            device_map=args.device,
-            revision="main",
-            torch_dtype=torch.bfloat16,
-            quantization_config=quant_config if not args.salience else None,
-            num_labels=len(args.classes),
-            trust_remote_code=False,
-            low_cpu_mem_usage=True,
-        )
-
         lora_config = LoraConfig(
-            r = args.lora_r,
-            lora_alpha = args.lora_alpha,
-            lora_dropout = 0.05,
-            bias="none",
-            target_modules="all-linear",
-            task_type=None,
-            inference_mode=False,
+                r = args.lora_r,
+                lora_alpha = args.lora_alpha,
+                lora_dropout = 0.1,
+                target_modules="all-linear",
+                task_type="FEATURE_EXTRACTION" if args.encoder else "CAUSAL_LM",
+                inference_mode=False,
         )
 
-        model = prepare_model_for_kbit_training(model, gradient_checkpointing_kwargs={'use_reentrant': False})
+        # load pretrained model
+        model_class = AutoModel if args.encoder else AutoModelForCausalLM
+        model_class = LlamaBiModel if args.bidirectional else model_class 
+        model = model_class.from_pretrained(args.model,
+                                            device_map=args.device,
+                                            low_cpu_mem_usage=True,
+                                            trust_remote_code=True,
+                                            revision="main",
+                                            # num_labels=len(args.classes),
+                                            quantization_config=quant_config,
+                                            pad_token_id=self.tokenizer.pad_token_id)
+
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=(args.device == 'auto'), gradient_checkpointing_kwargs={'use_reentrant': False})
         model = get_peft_model(model, lora_config)
         self.model = model
-        self.classifier = torch.nn.Linear(model.config.hidden_size, model.config.num_labels, bias=False, dtype=torch.float, device=self.device)
+        self.classifier = torch.nn.Linear(model.config.hidden_size, len(args.classes), bias=False, dtype=torch.float, device=self.device)
 
         if args.load:
             set_peft_model_state_dict(self.model, torch.load(f"{args.load}/adapter_model.pt"))
@@ -239,6 +216,8 @@ class Agent:
         all_targets = np.concatenate(all_targets)
         all_preds = np.concatenate(all_preds)
         target_names = list(self.train_dataset.label_dict.values())
+        if len(target_names) == 1:
+            target_names = ['Negative'] + target_names
         report = classification_report(all_targets, all_preds, target_names=target_names, zero_division=0, output_dict=True)
         report = {f"{k}_train": v for k, v in report.items()}
         report['epoch'] = self.epoch
@@ -269,6 +248,8 @@ class Agent:
         all_targets = np.concatenate(all_targets)
         all_preds = np.concatenate(all_preds)
         target_names = list(self.train_dataset.label_dict.values())
+        if len(target_names) == 1:
+            target_names = ['Negative'] + target_names
         report = classification_report(all_targets, all_preds, target_names=target_names, zero_division=0, output_dict=True)
         report['epoch'] = self.epoch
         report['lr'] = self.optimizer.param_groups[0]['lr']
@@ -282,8 +263,16 @@ class Agent:
         target = batch['target'].to(self.device)
 
         # call forward pass of the model
-        output = self.model(input_ids, attention_mask=attention_mask)
-        output = self.classifier(torch.mean(output.last_hidden_state, dim=1).to(self.classifier.weight.dtype))
+        output = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        last_hidden_state = output.hidden_states[-1]
+        if self.args.encoder:
+            mean_pooled = last_hidden_state.sum(axis=1) / attention_mask.sum(axis=-1).unsqueeze(-1)
+            output = self.classifier(mean_pooled.to(self.classifier.weight.dtype))
+        else:
+            last_token_idx = attention_mask.bool().sum(1) - 1
+            embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_token_idx]
+            # embeds = last_hidden_state[:, 0, :]
+            output = self.classifier(embeds.to(self.classifier.weight.dtype))
         # convert logits to probabilities
         preds = torch.sigmoid(output).round()
         # the defect is predicted if probability >= 50%
@@ -293,7 +282,7 @@ class Agent:
         return loss, acc, preds
 
     def compute_loss_multilabel(self, logits, target):
-        return F.binary_cross_entropy_with_logits(torch.sigmoid(logits), target, weight=self.train_dataset.wts.to(self.device))
+        return F.binary_cross_entropy_with_logits(torch.sigmoid(logits), target, pos_weight=self.train_dataset.wts.to(self.device))
 
     def _register_embedding_list_hook(self, embeddings_list):
         def forward_hook(module, inputs, outputs):
@@ -353,5 +342,11 @@ class Agent:
                 pred = prob.round()
                 preds.append(pred)
                 probs.append(prob)
+
+        target_names = list(self.train_dataset.label_dict.values())
+        if len(target_names) == 1:
+            target_names = ['Negative'] + target_names
+        report = classification_report(targets, np.concatenate(preds), target_names=target_names, zero_division=0, output_dict=True)
+        print(report)
 
         return texts_tokenized, preds, probs

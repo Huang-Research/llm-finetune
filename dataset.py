@@ -5,12 +5,13 @@ import numpy as np
 import pandas as pd
 
 class HEDataset(Dataset):
-    def __init__(self, path, tokenizer, max_length, classes, split):
-        self.classes = classes
+    def __init__(self, path, tokenizer, args, split):
+        self.args = args
+        self.classes = args.classes
         self.num_classes = len(self.classes)
         self.split = split
         self.tokenizer = tokenizer
-        self.max_length = max_length
+        self.max_length = args.max_seq_len
         self.df = self.preprocess(path)
         self.data = self.load_data(self.df)
 
@@ -32,7 +33,7 @@ class HEDataset(Dataset):
         # remap to be contiguous
         df['label'] = df['label'].apply(lambda x: [np.arange(self.num_classes)[l] for l in x if l in label_incl])
         return df
-        
+
     def load_data(self, df):
         data = []
 
@@ -40,13 +41,32 @@ class HEDataset(Dataset):
             i: label for i, label in enumerate(self.classes)
         }
 
+        if self.args.only_jiong:
+            df = df[df['task_type'].str.contains('jiong')]
+
+        if self.args.trim:
+            df['text'] = df['text'].apply(lambda x: " ".join(x.split()))
+
+        if self.args.requirements:
+            df['text'] = (
+f"""#Find the defects in the code, given the following requirements
+# #Start of requirements
+# {df['requirements']}
+
+# #Start of code
+# {df['text']}"""
+            )
+
         output = self.tokenizer(df['text'].to_list(), padding='max_length', max_length=self.max_length, truncation=True, return_tensors='pt')
         input_ids = output['input_ids']
         att_mask = output['attention_mask']
 
-        label_freqs = df['label'].explode().value_counts().sort_index()
-        label_freqs /= label_freqs.sum()
-        self.wts = torch.FloatTensor(label_freqs.to_list())
+        label_counts = df['label'].explode().value_counts().sort_index()
+        label_counts /= label_counts.sum()
+        self.wts = torch.FloatTensor(label_counts.to_list())
+        # self.wts = (label_counts.sum() - self.wts) / self.wts
+        self.wts = 1 / self.wts
+        print(f'Label counts: {label_counts.to_list()}')
 
         for i in range(len(df)):
             target = torch.zeros(self.num_classes)

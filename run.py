@@ -22,6 +22,11 @@ def main():
     parser.add_argument('--infer', action='store_true', help='Run inference only')
     parser.add_argument('--salience', type=int, help='Index of salience map', default=None)
     parser.add_argument('--test', action='store_true', help='Run test dataset')
+    parser.add_argument('--encoder', action='store_true', help='Specify model is an encoder')
+    parser.add_argument('--requirements', action='store_true', help='Insert requirements into the prompt')
+    parser.add_argument('--trim', action='store_true', help='Trim the input text')
+    parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional attention')
+    parser.add_argument('--only_jiong', action='store_true', help='Use only Jiong data')
 
     args = parser.parse_args()
     args.classes = args.classes.split(',')
@@ -61,7 +66,16 @@ def train(args):
                     "device": args.device,
                     "val_interval": args.val_interval,
                     "profile": args.profile,
-                    "scheduler": args.scheduler
+                    "scheduler": args.scheduler,
+                    "load": args.load,
+                    "infer": args.infer,
+                    "salience": args.salience,
+                    "test": args.test,
+                    "encoder": args.encoder,
+                    "requirements": args.requirements,
+                    "trim": args.trim,
+                    "bidirectional": args.bidirectional,
+                    "only_jiong": args.only_jiong,
                   })
 
     a.train()
@@ -81,7 +95,7 @@ def infer(args):
         np.save('output/salience.npy', salience)
     else:
         print("Predicting...")
-        text_tokenized, preds, probs, salience = a.predict(texts, targets)
+        text_tokenized, preds, probs = a.predict(texts, targets)
         
         items = zip(targets, text_tokenized, preds, probs)
         json.dump(list(map(lambda x: {

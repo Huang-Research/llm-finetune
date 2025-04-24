@@ -1,22 +1,20 @@
 import pandas as pd
+import numpy as np
 import json
+from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.preprocessing import MultiLabelBinarizer
 
 data = []
 with open('multi_combined_data.json', 'r') as f:
     for line in f:
         j = json.loads(line)
-#         j['text'] = f"""#Find the defects in the code, given the following requirements
-# #Start of requirements
-# {j['metadata']['requirements']}
-
-# #Start of code
-# {j['text']}"""
         j['split'] = j['metadata']['split']
-        # for label in j['label']:
-            # j[f'label_{label}'] = 1
-
+        j['requirements'] = j['metadata']['requirements']
+        j['task_type'] = j['metadata']['task_type']
         data.append(j)
 df = pd.DataFrame(data).fillna(0)
+df.label = df.label.map(lambda x: list(set(x)))
+
 print(df.head())
 
 train_df = df[df['split'] == 'train']
@@ -28,3 +26,19 @@ assert len(test_df['label'].explode().unique()) == len(train_df['label'].explode
 train_df.to_pickle('train.pkl')
 val_df.to_pickle('val.pkl')
 test_df.to_pickle('test.pkl')
+
+print(f"Train set: {len(train_df)} samples")
+print(f"\tLabel counts:", train_df['label'].explode().value_counts().to_dict())
+print(f"Validation set: {len(val_df)} samples")
+print(f"\tLabel counts:", val_df['label'].explode().value_counts().to_dict())
+print(f"Test set: {len(test_df)} samples")
+print(f"\tLabel counts:", test_df['label'].explode().value_counts().to_dict())
+
+bin = MultiLabelBinarizer().fit_transform(test_df['label'])
+
+y_pred = np.ones_like(bin)
+
+print("Baseline scores:")
+print(f"F1: {f1_score(bin, y_pred, average='macro')}")
+print(f"Precision: {precision_score(bin, y_pred, average='macro')}")
+print(f"Recall: {recall_score(bin, y_pred, average='macro')}")
