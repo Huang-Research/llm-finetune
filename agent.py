@@ -287,40 +287,62 @@ class Agent:
     def _register_embedding_list_hook(self, embeddings_list):
         def forward_hook(module, inputs, outputs):
             embeddings_list.append(outputs.clone().detach().cpu())
-        embedding_layer = self.model.base_model.model.model.embed_tokens
+        # embedding_layer = self.model.base_model.model.model.embed_tokens
+        embedding_layer = self.model.model.model.embed_tokens
+        for p in embedding_layer.parameters():
+            p.requires_grad = True
         handle = embedding_layer.register_forward_hook(forward_hook)
+        return handle
 
     def _register_embedding_gradient_hooks(self, embeddings_gradients):
         def hook_layers(module, grad_in, grad_out):
             embeddings_gradients.append(grad_out[0].clone().detach().cpu())
-        embedding_layer = self.model.base_model.model.embed_tokens
+        embedding_layer = self.model.model.model.embed_tokens
+        for p in embedding_layer.parameters():
+            p.requires_grad = True
         hook = embedding_layer.register_full_backward_hook(hook_layers)
         return hook
 
-    def generate_salience(self, text, target):
-        # self._register_embedding_list_hook(embeddings_list)
-        
-        salience = []        
+    def generate_salience(self, texts, targets):
+        salience = []
         embeddings_list, embeddings_gradients = [], []
-        
+        probs, inputs = [], []
+
+        handle = self._register_embedding_list_hook(embeddings_list)
         hook = self._register_embedding_gradient_hooks(embeddings_gradients)
 
-        output = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
-        input_ids = output['input_ids'].to(self.device)
-        attention_mask = output['attention_mask'].to(self.device)
-        target = target.to(self.device)
+        for text, target in tqdm(zip(texts, targets), desc='Generating salience', total=len(texts)):
+            output = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
+            input_ids = output['input_ids'].to(self.device)
+            attention_mask = output['attention_mask'].to(self.device)
+            target = target.to(self.device)
 
-        # call forward pass of the model
-        output = self.model(input_ids, attention_mask=attention_mask)
-        output = self.classifier(torch.mean(output.last_hidden_state, dim=1).to(self.classifier.weight.dtype))
-        prob = torch.sigmoid(output).detach().cpu()
+            # call forward pass of the model
+            output = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+            last_hidden_state = output.hidden_states[-1]
+            if self.args.encoder:
+                mean_pooled = last_hidden_state.sum(axis=1) / attention_mask.sum(axis=-1).unsqueeze(-1)
+                output = self.classifier(mean_pooled.to(self.classifier.weight.dtype))
+            else:
+                last_token_idx = attention_mask.bool().sum(1) - 1
+                embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_token_idx]
+                # embeds = last_hidden_state[:, 0, :]
+                output = self.classifier(embeds.to(self.classifier.weight.dtype)) 
+            prob = torch.sigmoid(output).detach().cpu().numpy()
+            loss = self.compute_loss_multilabel(output.squeeze(0), target)
+            loss.backward()
+            probs.append(prob)
+            inputs.append(input_ids)
 
         hook.remove()
-        salience = torch.stack(embeddings_gradients, dim=0)
-        loss = self.compute_loss_multilabel(output.squeeze(0), target)
-        loss.backward()
-
-        return self.tokenizer.decode(input_ids[0]), salience, prob, target
+        handle.remove()
+        embeddings_gradients = torch.stack(embeddings_gradients).flatten(end_dim=1).cpu().numpy()
+        embeddings_list = torch.stack(embeddings_list).flatten(end_dim=1).cpu().numpy()
+        salience = np.sum(embeddings_gradients * embeddings_list, axis=1)
+        toks = torch.stack(inputs, dim=0).cpu().numpy()
+        toks = [self.tokenizer.tokenize(self.tokenizer.decode(t[0])) for t in toks]
+        print(salience.shape)
+        return salience, toks, probs, targets
     
     def predict(self, input_texts, targets):
         self.model.train()
@@ -335,8 +357,16 @@ class Agent:
                 target = target.to(self.device)
 
                 # call forward pass of the model
-                output = self.model(input_ids, attention_mask=attention_mask)
-                output = self.classifier(torch.mean(output.last_hidden_state, dim=1).to(self.classifier.weight.dtype))
+                output = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                last_hidden_state = output.hidden_states[-1]
+                if self.args.encoder:
+                    mean_pooled = last_hidden_state.sum(axis=1) / attention_mask.sum(axis=-1).unsqueeze(-1)
+                    output = self.classifier(mean_pooled.to(self.classifier.weight.dtype))
+                else:
+                    last_token_idx = attention_mask.bool().sum(1) - 1
+                    embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_token_idx]
+                    # embeds = last_hidden_state[:, 0, :]
+                    output = self.classifier(embeds.to(self.classifier.weight.dtype))
                 # convert logits to probabilities
                 prob = torch.sigmoid(output).detach().cpu()
                 pred = prob.round()
@@ -349,4 +379,46 @@ class Agent:
         report = classification_report(targets, np.concatenate(preds), target_names=target_names, zero_division=0, output_dict=True)
         print(report)
 
+        return texts_tokenized, preds, probs
+    
+    def tsne(self, input_texts, targets):
+        from sklearn.manifold import TSNE
+        from sklearn.decomposition import PCA
+        import matplotlib.pyplot as plt
+                
+        self.model.train()
+        texts_tokenized, preds, probs = [], [], []
+        embeds = []
+
+        with torch.no_grad():
+            for text, target in tqdm(zip(input_texts, targets), desc='Predicting', total=len(input_texts)):
+                output = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
+                input_ids = output['input_ids'].to(self.device)
+                attention_mask = output['attention_mask'].to(self.device)
+                texts_tokenized.append(self.tokenizer.decode(input_ids[0]))
+                target = target.to(self.device)
+
+                # call forward pass of the model
+                output = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+                last_hidden_state = output.hidden_states[-1]
+                if self.args.encoder:
+                    embed = last_hidden_state.sum(axis=1) / attention_mask.sum(axis=-1).unsqueeze(-1)
+                else:
+                    last_token_idx = attention_mask.bool().sum(1) - 1
+                    embed = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_token_idx]
+                output = self.classifier(embed.to(self.classifier.weight.dtype))
+                embeds.append(output.cpu().numpy())
+
+        embeds = np.concatenate(embeds)
+        # pca = PCA(n_components=3)
+        # pca_result = pca.fit_transform(embeds)
+        tsne = TSNE(n_components=2, perplexity=15, n_iter=400)
+        tsne_result = tsne.fit_transform(embeds)
+        fig, ax = plt.subplots(3, 1, figsize=(5, 15))
+        for i in range(len(targets)):
+            ax[0].scatter(tsne_result[i, 0], tsne_result[i, 1], c='red' if targets[i][0] else 'blue')
+            ax[1].scatter(tsne_result[i, 0], tsne_result[i, 1], c='red' if targets[i][1] else 'blue')
+            ax[2].scatter(tsne_result[i, 0], tsne_result[i, 1], c='red' if targets[i][2] else 'blue')
+
+        plt.savefig('output/tsne.png')        
         return texts_tokenized, preds, probs

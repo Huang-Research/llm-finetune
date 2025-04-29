@@ -27,6 +27,7 @@ def main():
     parser.add_argument('--trim', action='store_true', help='Trim the input text')
     parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional attention')
     parser.add_argument('--only_jiong', action='store_true', help='Use only Jiong data')
+    parser.add_argument('--tsne', action='store_true', help='Output t-SNE visualization')
 
     args = parser.parse_args()
     args.classes = args.classes.split(',')
@@ -88,11 +89,16 @@ def infer(args):
     
     targets = [i['target'] for i in a.val_dataset]
     texts = [i['text'] for _, i in a.val_dataset.df.iterrows()]
-
     if args.salience:
         print("Generating salience...")
-        salience = a.generate_salience(texts[args.salience], targets[args.salience])
-        np.save('output/salience.npy', salience)
+        salience, toks, probs, targets = a.generate_salience(texts, targets)
+        np.save('output/salience_scores.npy', salience)
+        np.save('output/salience_toks.npy', toks)
+        np.save('output/salience_probs.npy', probs)
+        np.save('output/salience_targets.npy', targets)
+    elif args.tsne:
+        print("Generating t-SNE...")
+        a.tsne(texts, targets)
     else:
         print("Predicting...")
         text_tokenized, preds, probs = a.predict(texts, targets)
