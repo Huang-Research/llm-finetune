@@ -57,6 +57,9 @@ f"""#Find the defects in the code, given the following requirements
 # {df['text']}"""
             )
 
+        # append eos as classification token
+        df['text'] = df['text'].apply(lambda x: x + self.tokenizer.eos_token)
+
         output = self.tokenizer(df['text'].to_list(), padding='max_length', max_length=self.max_length, truncation=True, return_tensors='pt')
         input_ids = output['input_ids']
         att_mask = output['attention_mask']
