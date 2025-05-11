@@ -83,7 +83,7 @@ class Agent:
         self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        assert self.tokenizer.model_max_length >= args.max_seq_len, f"Tokenizer max length {self.tokenizer.model_max_length} is less than max_seq_len {args.max_seq_len}"
+        assert args.chunk_size or self.tokenizer.model_max_length >= args.max_seq_len, f"Tokenizer max length {self.tokenizer.model_max_length} is less than max_seq_len {args.max_seq_len}"
 
         self.train_dataset = HEDataset(os.path.join(args.load, 'train.pkl'), self.tokenizer, args, split='train')
         if args.test:
@@ -107,7 +107,7 @@ class Agent:
                 r = args.lora_r,
                 lora_alpha = args.lora_alpha,
                 lora_dropout = 0.1,
-                target_modules="all-linear",
+                target_modules='all-linear',
                 task_type="FEATURE_EXTRACTION" if args.encoder else "CAUSAL_LM",
                 inference_mode=False,
         )
@@ -127,7 +127,10 @@ class Agent:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=(args.device == 'auto'), gradient_checkpointing_kwargs={'use_reentrant': False})
         model = get_peft_model(model, lora_config)
         self.model = model
-        self.classifier = torch.nn.Linear(model.config.hidden_size, len(args.classes), bias=False, dtype=torch.float, device=self.device)
+        num_chunks = num_chunks = 1 + (self.args.max_seq_len - self.args.chunk_size) / self.args.chunk_stride
+        assert num_chunks == int(num_chunks)
+        self.dropout = torch.nn.Dropout(args.dropout)
+        self.classifier = torch.nn.Linear(model.config.hidden_size * num_chunks, len(args.classes), bias=False, dtype=torch.float, device=self.device)
 
         if args.load:
             set_peft_model_state_dict(self.model, torch.load(f"{args.load}/adapter_model.pt"))
@@ -138,7 +141,13 @@ class Agent:
         # load optimizer, scheduler, metrics
         self.train_metrics = defaultdict(list)
         self.val_metrics = defaultdict(list)
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+        lora_params = list(self.model.parameters())
+        classifier_params = list(self.classifier.parameters())
+        self.optimizer = torch.optim.AdamW([
+                {'params': lora_params, 'lr': args.lr},
+                {'params': classifier_params, 'lr': args.lr_clf}
+        ])
         num_training_steps = len(self.train_dataset) * self.num_epochs
         match args.scheduler:
             case 'linear':
@@ -267,17 +276,27 @@ class Agent:
         attention_mask = batch['attention_mask'].to(self.device)
         target = batch['target'].to(self.device)
 
-        # call forward pass of the model
-        output = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        last_hidden_state = output.hidden_states[-1]
-        if self.args.encoder:
-            mean_pooled = last_hidden_state.sum(axis=1) / attention_mask.sum(axis=-1).unsqueeze(-1)
-            output = self.classifier(mean_pooled.to(self.classifier.weight.dtype))
-        else:
-            assert self.tokenizer.padding_side == 'left'
-            embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), -1]
-            # embeds = last_hidden_state[:, 0, :]
-            output = self.classifier(embeds.to(self.classifier.weight.dtype))
+        agg_embed = []
+        num_chunks = 1 + (self.args.max_seq_len - self.args.chunk_size) / self.args.chunk_stride
+        for i in range(num_chunks):
+            start = i * (self.args.chunk_size - self.args.chunk_stride)
+            end = start + self.args.chunk_size
+            chunked_input_ids = input_ids[:, start:end]
+            chunked_attention_mask = attention_mask[:, start:end]
+            output = self.model(input_ids=chunked_input_ids, attention_mask=chunked_attention_mask, output_hidden_states=True)
+            last_hidden_state = output.hidden_states[-1]
+            if self.args.encoder:
+                embeds = last_hidden_state.sum(dim=1) / chunked_attention_mask.sum(dim=-1, keepdim=True).clamp(min=1)
+            else:
+                assert self.tokenizer.padding_side == 'left'
+                last_tok_idx = (chunked_attention_mask.sum(dim=1) - 1).clamp(min=0)
+                embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_tok_idx]
+            agg_embed.append(embeds)
+
+        # combine embeddings
+        agg_embed = torch.cat(agg_embed, dim=1)
+        output = self.dropout(agg_embed)
+        output = self.classifier(agg_embed.to(self.classifier.weight.dtype))
         # convert logits to probabilities
         preds = torch.sigmoid(output).round()
         # the defect is predicted if probability >= 50%
@@ -332,17 +351,28 @@ class Agent:
             attention_mask = output['attention_mask'].to(self.device)
             target = torch.FloatTensor(target).to(self.device)
 
-            # call forward pass of the model
-            output = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-            last_hidden_state = output.hidden_states[-1]
-            if self.args.encoder:
-                mean_pooled = last_hidden_state.sum(axis=1) / attention_mask.sum(axis=-1).unsqueeze(-1)
-                output = self.classifier(mean_pooled.to(self.classifier.weight.dtype))
-            else:
-                last_token_idx = attention_mask.bool().sum(1) - 1
-                embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_token_idx]
-                output = self.classifier(embeds.to(self.classifier.weight.dtype))
-            # convert logits to probabilities
+            agg_embed = []
+            num_chunks = 1 + (self.args.max_seq_len - self.args.chunk_size) / self.args.chunk_stride
+            for i in range(num_chunks):
+                start = i * (self.args.chunk_size - self.args.chunk_stride)
+                end = start + self.args.chunk_size
+                chunked_input_ids = input_ids[:, start:end]
+                chunked_attention_mask = attention_mask[:, start:end]
+                output = self.model(input_ids=chunked_input_ids, attention_mask=chunked_attention_mask, output_hidden_states=True)
+                last_hidden_state = output.hidden_states[-1]
+                if self.args.encoder:
+                    embeds = last_hidden_state.sum(dim=1) / chunked_attention_mask.sum(dim=-1, keepdim=True).clamp(min=1)
+                else:
+                    assert self.tokenizer.padding_side == 'left'
+                    last_tok_idx = (chunked_attention_mask.sum(dim=1) - 1).clamp(min=0)
+                    embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_tok_idx]
+                agg_embed.append(embeds)
+
+            # combine embeddings
+            agg_embed = torch.cat(agg_embed, dim=1)
+            output = self.dropout(agg_embed)
+            output = self.classifier(agg_embed.to(self.classifier.weight.dtype))
+
             prob = torch.sigmoid(output).detach().cpu()
             pred = prob.round()
 
@@ -360,7 +390,7 @@ class Agent:
         df['prob'] = all_probs        
 
         target_names = list(self.train_dataset.label_dict.values())
-        report = classification_report(all_targets, np.concatenate(all_preds), target_names=target_names, zero_division=0, output_dict=True)
+        report = classification_report(all_targets, np.concatenate(all_preds), target_names=target_names, zero_division=0)
         print(report)
 
         if salience:

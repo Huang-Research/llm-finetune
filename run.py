@@ -32,11 +32,15 @@ def main():
     parser.add_argument('--epoch', type=int, default=10, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate')
+    parser.add_argument('--lr_clf', type=float, default=1e-5, help='Classifier learning rate')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--weight_decay', type=float, default=0, help='Weight decay')
     parser.add_argument('--warmup_steps', type=int, default=0, help='Warmup steps')
     parser.add_argument('--lora_r', type=int, default=8, help='Lora rank')
     parser.add_argument('--lora_alpha', type=int, default=32, help='Lora alpha')
     parser.add_argument('--scheduler', type=str, default='linear', help='Scheduler to use')
+    parser.add_argument('--chunk_size', type=int, default=2048, help='Chunk size for chunking')
+    parser.add_argument('--chunk_stride', type=int, default=256, help='Chunk stride for chunking')
 
     # EVAL
     parser.add_argument('--evaluate', action='store_true', help='Evaluate the model (inference)')
@@ -94,6 +98,10 @@ def train(args):
         "trim": args.trim,
         "bidirectional": args.bidirectional,
         "only_jiong": args.only_jiong,
+        "chunk_size": args.chunk_size,
+        "chunk_stride": args.chunk_stride,
+        "lr_clf": args.lr_clf,
+        "dropout": args.dropout,
     }
 
     a = Agent(args)

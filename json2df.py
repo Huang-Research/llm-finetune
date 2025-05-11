@@ -15,6 +15,10 @@ with open('multi_combined_data.json', 'r') as f:
 df = pd.DataFrame(data).fillna(0)
 df.label = df.label.map(lambda x: list(set(x)))
 
+print(df[df['split'] == 'test']['task_type'].value_counts())
+print(df[df['split'] == 'train']['task_type'].value_counts())
+print(df[df['split'] == 'val']['task_type'].value_counts())
+
 print(df.head())
 
 train_df = df[df['split'] == 'train']
@@ -34,11 +38,13 @@ print(f"\tLabel counts:", val_df['label'].explode().value_counts().to_dict())
 print(f"Test set: {len(test_df)} samples")
 print(f"\tLabel counts:", test_df['label'].explode().value_counts().to_dict())
 
-bin = MultiLabelBinarizer().fit_transform(test_df['label'])
+for name, df in zip(['train', 'val', 'test'], [train_df, val_df, test_df]):
+    print (f"{name}:")
+    bin = MultiLabelBinarizer().fit_transform(df['label'])
 
-y_pred = np.ones_like(bin)
+    y_pred = np.ones_like(bin)
 
-print("Baseline scores:")
-print(f"F1: {f1_score(bin, y_pred, average='macro')}")
-print(f"Precision: {precision_score(bin, y_pred, average='macro')}")
-print(f"Recall: {recall_score(bin, y_pred, average='macro')}")
+    print("Baseline scores:")
+    print(f"F1: {f1_score(bin, y_pred, average='macro')}")
+    print(f"Precision: {precision_score(bin, y_pred, average='macro')}")
+    print(f"Recall: {recall_score(bin, y_pred, average='macro')}")
