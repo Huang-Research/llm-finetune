@@ -1,0 +1,7 @@
+--epoch 15 --lr 1e-6 --lr_clf 1e-6 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 512 --chunk_stride 256 --encoder --model microsoft/codebert-base
+--epoch 15 --lr 1e-6 --lr_clf 1e-6 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 1024 --chunk_stride 256 --encoder --device cuda --model codesage/codesage-small-v2
+--epoch 15 --lr 1e-6 --lr_clf 1e-6 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 512 --chunk_stride 256 --encoder --scheduler linear --model codesage/codesage-small-v2 --device cuda
+--epoch 15 --lr 1e-6 --lr_clf 1e-6 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 2048 --chunk_stride 2048 --encoder --model codesage/codesage-large-v2 --device cuda
+--epoch 15 --lr 1e-6 --lr_clf 1e-6 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 2048 --chunk_stride 2048 --model deepseek-ai/deepseek-coder-1.3b-base
+--epoch 15 --lr 3e-7 --lr_clf 3e-7 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 2048 --chunk_stride 2048 --model meta-llama/CodeLlama-7b-hf
+--epoch 15 --lr 8e-7 --lr_clf 8e-7 --lora_r 64 --lora_alpha 128 --scheduler linear --max_seq_len 2048 --warmup_steps 200 --batch_size 2 --chunk_size 2048 --chunk_stride 2048 --model deepseek-ai/deepseek-coder-6.7b-base

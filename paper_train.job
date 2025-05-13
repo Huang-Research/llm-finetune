@@ -1,0 +1,18 @@
+universe = vanilla
+executable = ./run.sh
+request_cpus = 8
+request_gpus = 1
+gpus_minimum_memory = 20000MB
+request_memory = 16GB
+output = .condor_logs/$(Cluster).$(Process).out
+error  = .condor_logs/$(Cluster).$(Process).err
+log    = .condor_logs/$(Cluster).$(Process).log 
+
++JobBatchName = "paper train models"
+
++WantH100 = True
++WantPreempt = True
+
+arguments = $(args)
+
+Queue arguments from paper_train.txt

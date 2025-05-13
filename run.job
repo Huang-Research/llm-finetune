@@ -3,11 +3,13 @@ executable = ./run.sh
 request_cpus = 1
 request_gpus = 1
 gpus_minimum_memory = 20GB
-request_memory = 20GB
+request_memory = 12GB
 output = .condor_logs/$(Cluster).$(Process).out
 error  = .condor_logs/$(Cluster).$(Process).err
 log    = .condor_logs/$(Cluster).$(Process).log
 +CSCI_GrpDesktop = true
+
++JobBatchName = "lr_clf sweep deepseek1.3"
 
 arguments = $(args)
 Queue arguments from args.txt

@@ -27,7 +27,8 @@ def main():
     parser.add_argument('--encoder', action='store_true', help='Specify model is an encoder')
     parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional attention')
     parser.add_argument('--val_interval', type=int, default=1, help='Validation frequency')
-    
+    parser.add_argument('--ft_layers', type=int, default=0, help='Number of layers to fine-tune')
+
     # PARAMETERS
     parser.add_argument('--epoch', type=int, default=10, help='Number of epochs')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
@@ -112,10 +113,34 @@ def train(args):
 
 def evaluate(args):
     from agent import Agent
+    from dataset import HEDataset
+    from evaluate import (
+        compute_baseline,
+        compute_roc_auc_table,
+        compute_pr_auc_table,
+        find_best_thresholds,
+        evaluate_with_thresholds,
+    )
 
     a = Agent(args)
-    df = a.evaluate(a.val_dataset.df, args.salience)
-    df.to_pickle(f"output/results.pkl")
+    test_dataset = HEDataset('test.pkl', a.tokenizer, args, split='test')
+    val_df = a.evaluate(a.val_dataset.df, args.salience)
+    test_df = a.evaluate(test_dataset.df, args.salience)
+
+    print("Baseline performance metrics:")
+    baseline_metrics = compute_baseline(test_df)
+    for class_id, metrics in baseline_metrics.items():
+        print(f"{class_id}: F1: {metrics['F1']:.2f}, Precision: {metrics['Precision']:.2f}, Recall: {metrics['Recall']:.2f}")
+    
+    print(compute_roc_auc_table(test_df).round(3))
+    print(compute_pr_auc_table(test_df).round(3))
+    
+    thresholds = find_best_thresholds(val_df)
+    print(f'Val dataset thresholds: {thresholds}')
+    f1_scores, precision_scores, recall_scores = evaluate_with_thresholds(test_df, thresholds)
+    print(f'Test dataset F1 scores: {f1_scores}')
+    print(f'Test dataset precision scores: {precision_scores}')
+    print(f'Test dataset recall scores: {recall_scores}')
 
 if __name__ == "__main__":
     main()

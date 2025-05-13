@@ -1,59 +1,37 @@
+import os, pickle
+import torch
+import wandb
 from collections import defaultdict
 import os, pickle
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-import wandb.sklearn
 from tqdm import tqdm
 from sklearn.metrics import classification_report
-import wandb
-from llm2vec.llm2vec.models.bidirectional_llama import LlamaBiModel
+
 from transformers import (
-    LlamaPreTrainedModel,
-    AutoModelForSequenceClassification,
-    AutoModel,
-    AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     get_linear_schedule_with_warmup,
     get_constant_schedule_with_warmup,
     get_cosine_schedule_with_warmup,
     get_cosine_with_hard_restarts_schedule_with_warmup,
 )
-from peft import (
-    PeftModel,
-    PeftModelForSequenceClassification,
-    LoraConfig,
-    get_peft_model,
-    get_peft_model_state_dict,
-    set_peft_model_state_dict,
-    prepare_model_for_kbit_training,
-)
 
 from dataset import HEDataset
-
-# # adapted from llm2vec
-# class LlamaBiForSeqCls(torch.nn.Module):
-#     def __init__(self, config):
-#         self.model = LlamaBiModel(config)
-#         self.classifier = torch.nn.Linear(config.hidden_size, config.num_labels, bias=False, dtype=torch.float)
-
-#         # Initialize weights and apply final processing
-#         self.post_init()
-
-#     def forward(self, input_ids, attention_mask=None, labels=None):
-#         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-#         return self.classifier(outputs[0].mean(dim=1).to(self.classifier.weight.dtype))
+from models import (
+    EmbeddingClassifier,
+    LayerFTModel,
+    LoRAModel,
+)
 
 class Agent:
     def __init__(self, args, load_path=""):
-        self.device = args.device if args.device != 'auto' else 'cuda'
-        self.num_epochs = args.epoch
-        self.val_interval = args.val_interval
-        self.profile = args.profile
         self.args = args
+        self.device = args.device if args.device != 'auto' else 'cuda'
+
+        self.train_metrics = defaultdict(list)
+        self.val_metrics = defaultdict(list)
 
         self.load_or_resume(args)
 
@@ -62,8 +40,7 @@ class Agent:
         if not os.path.exists(path):
             os.makedirs(path)
 
-        torch.save(get_peft_model_state_dict(self.model), f"{path}/adapter_model.pt")
-        torch.save(self.classifier.weight, f"{path}/classifier.pt")
+        self.model.save(path)
         self.train_dataset.save(f"{path}/train.pkl")
         if args.test:
             self.val_dataset.save(f"{path}/test.pkl")
@@ -83,7 +60,6 @@ class Agent:
         self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        assert args.chunk_size or self.tokenizer.model_max_length >= args.max_seq_len, f"Tokenizer max length {self.tokenizer.model_max_length} is less than max_seq_len {args.max_seq_len}"
 
         self.train_dataset = HEDataset(os.path.join(args.load, 'train.pkl'), self.tokenizer, args, split='train')
         if args.test:
@@ -94,61 +70,23 @@ class Agent:
         self.train_loader = DataLoader(self.train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
         self.val_loader = DataLoader(self.val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True)
 
-        quant_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            # TODO: the classification head should be separate from the base model
-            llm_int8_skip_modules=["classifier", "pre_classifier"] if args.model.find('codebert') != -1 else None,
-        )
+        if self.args.ft_layers > 0:
+            embedder_class = LayerFTModel
+        else:
+            embedder_class = LoRAModel
+        self.model = EmbeddingClassifier(embedder_class, self.tokenizer, args)
 
-        lora_config = LoraConfig(
-                r = args.lora_r,
-                lora_alpha = args.lora_alpha,
-                lora_dropout = 0.1,
-                target_modules='all-linear',
-                task_type="FEATURE_EXTRACTION" if args.encoder else "CAUSAL_LM",
-                inference_mode=False,
-        )
-
-        # load pretrained model
-        model_class = AutoModel if args.encoder else AutoModelForCausalLM
-        model_class = LlamaBiModel if args.bidirectional else model_class 
-        model = model_class.from_pretrained(args.model,
-                                            device_map=args.device,
-                                            low_cpu_mem_usage=True,
-                                            trust_remote_code=True,
-                                            revision="main",
-                                            # num_labels=len(args.classes),
-                                            quantization_config=quant_config,
-                                            pad_token_id=self.tokenizer.pad_token_id)
-
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=(args.device == 'auto'), gradient_checkpointing_kwargs={'use_reentrant': False})
-        model = get_peft_model(model, lora_config)
-        self.model = model
-        num_chunks = num_chunks = 1 + (self.args.max_seq_len - self.args.chunk_size) / self.args.chunk_stride
-        assert num_chunks == int(num_chunks)
-        self.dropout = torch.nn.Dropout(args.dropout)
-        self.classifier = torch.nn.Linear(model.config.hidden_size * num_chunks, len(args.classes), bias=False, dtype=torch.float, device=self.device)
-
-        if args.load:
-            set_peft_model_state_dict(self.model, torch.load(f"{args.load}/adapter_model.pt"))
-            with torch.no_grad():
-                self.classifier.weight.copy_(torch.load(f"{args.load}/classifier.pt"))
-        self.model.print_trainable_parameters()
-
-        # load optimizer, scheduler, metrics
-        self.train_metrics = defaultdict(list)
-        self.val_metrics = defaultdict(list)
-
-        lora_params = list(self.model.parameters())
-        classifier_params = list(self.classifier.parameters())
         self.optimizer = torch.optim.AdamW([
-                {'params': lora_params, 'lr': args.lr},
-                {'params': classifier_params, 'lr': args.lr_clf}
+            {
+                'params': list(self.model.embedding_model.parameters()),
+                'lr': args.lr
+             },
+            {   'params': list(self.model.classifier.parameters()),
+                'lr': args.lr_clf
+            }
         ])
-        num_training_steps = len(self.train_dataset) * self.num_epochs
+
+        num_training_steps = len(self.train_dataset) * self.args.epoch
         match args.scheduler:
             case 'linear':
                 self.scheduler = get_linear_schedule_with_warmup(
@@ -184,8 +122,8 @@ class Agent:
             self.val_metrics = pickle.load(open(f"{args.load}/val_metrics.pkl", "rb"))
 
     def train(self):
-        for self.epoch in range(self.num_epochs):
-            if self.profile:
+        for self.epoch in range(self.args.epoch):
+            if self.args.profile:
                 with torch.profiler.profile(
                     with_stack=True) as prof:
                     self.train_one_epoch()
@@ -194,14 +132,14 @@ class Agent:
             else:
                 self.train_one_epoch()
 
-            if self.epoch % self.val_interval == 0:
+            if self.epoch % self.args.val_interval == 0:
                 self.validate()
 
                 if min(self.val_metrics['loss']) == self.val_metrics['loss'][-1]:
                     self.save_checkpoint(self.args, f'{wandb.run.dir}/best')
                     print(f'Best model saved to {wandb.run.dir}/best')
 
-            if self.epoch == self.num_epochs - 1:
+            if self.epoch == self.args.epoch - 1:
                 self.save_checkpoint(self.args, f'{wandb.run.dir}/final')
                 print(f'Final model saved to {wandb.run.dir}/final')
 
@@ -212,11 +150,21 @@ class Agent:
 
         tqdm_batch = tqdm(self.train_loader, total=len(self.train_loader), desc=f'Train [Epoch {self.epoch}]')
         for batch in tqdm_batch:
+            target = batch['target'].to(self.device)
+            input_ids = batch['input_ids'].to(self.device)
+            attention_mask = batch['attention_mask'].to(self.device)
+
             self.optimizer.zero_grad()
 
-            loss, acc, preds = self.forward(batch)
+            output = self.model.forward(input_ids=input_ids, attention_mask=attention_mask)
+            # convert logits to probabilities
+            preds = torch.sigmoid(output).round()
+            # the defect is predicted if probability >= 50%
+            acc = (preds == target).sum().item() / target.numel()
+
+            loss = self.compute_loss_multilabel(output, target)
             loss.backward()
-            
+
             self.optimizer.step()
             self.scheduler.step()
 
@@ -248,11 +196,25 @@ class Agent:
 
         tqdm_batch = tqdm(self.val_loader, total=len(self.val_loader), desc='Val')
         for batch in tqdm_batch:
-
-            loss, acc, preds = self.forward(batch)
+            target = batch['target'].to(self.device)
+            input_ids = batch['input_ids'].to(self.device)
+            attention_mask = batch['attention_mask'].to(self.device)
+            
+            output = self.model.forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            
+            # convert logits to probabilities
+            preds = torch.sigmoid(output).round()
+            # the defect is predicted if probability >= 50%
+            acc = (preds == target).sum().item() / target.numel()
+            loss = self.compute_loss_multilabel(output, target)
+            # convert logits to probabilities
+            preds = torch.sigmoid(output).round()
 
             all_preds += [preds.detach().cpu().numpy()]
-            all_targets += [batch['target'].cpu().numpy()]
+            all_targets += [target.cpu().numpy()]
             losses += [loss.item()]
             accs += [acc]
             tqdm_batch.set_postfix({'loss': np.mean(losses), 'acc': np.mean(accs)})
@@ -271,48 +233,13 @@ class Agent:
         report['val_acc'] = np.mean(accs)
         wandb.log(report)
 
-    def forward(self, batch):
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
-        target = batch['target'].to(self.device)
-
-        agg_embed = []
-        num_chunks = 1 + (self.args.max_seq_len - self.args.chunk_size) / self.args.chunk_stride
-        for i in range(num_chunks):
-            start = i * (self.args.chunk_size - self.args.chunk_stride)
-            end = start + self.args.chunk_size
-            chunked_input_ids = input_ids[:, start:end]
-            chunked_attention_mask = attention_mask[:, start:end]
-            output = self.model(input_ids=chunked_input_ids, attention_mask=chunked_attention_mask, output_hidden_states=True)
-            last_hidden_state = output.hidden_states[-1]
-            if self.args.encoder:
-                embeds = last_hidden_state.sum(dim=1) / chunked_attention_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-            else:
-                assert self.tokenizer.padding_side == 'left'
-                last_tok_idx = (chunked_attention_mask.sum(dim=1) - 1).clamp(min=0)
-                embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_tok_idx]
-            agg_embed.append(embeds)
-
-        # combine embeddings
-        agg_embed = torch.cat(agg_embed, dim=1)
-        output = self.dropout(agg_embed)
-        output = self.classifier(agg_embed.to(self.classifier.weight.dtype))
-        # convert logits to probabilities
-        preds = torch.sigmoid(output).round()
-        # the defect is predicted if probability >= 50%
-        acc = (preds == target).sum().item() / target.numel()
-
-        loss = self.compute_loss_multilabel(output, target)
-        return loss, acc, preds
-
     def compute_loss_multilabel(self, logits, target):
         return F.binary_cross_entropy_with_logits(torch.sigmoid(logits), target, pos_weight=self.train_dataset.wts.to(self.device))
 
     def _register_embedding_list_hook(self, embeddings_list):
         def forward_hook(module, inputs, outputs):
             embeddings_list.append(outputs.clone().detach().cpu())
-        # embedding_layer = self.model.base_model.model.model.embed_tokens
-        embedding_layer = self.model.model.model.embed_tokens
+        embedding_layer = self.model.embedding_model.model.model.embed_tokens
         for p in embedding_layer.parameters():
             p.requires_grad = True
         handle = embedding_layer.register_forward_hook(forward_hook)
@@ -321,7 +248,7 @@ class Agent:
     def _register_embedding_gradient_hooks(self, embeddings_gradients):
         def hook_layers(module, grad_in, grad_out):
             embeddings_gradients.append(grad_out[0].clone().detach().cpu())
-        embedding_layer = self.model.model.model.embed_tokens
+        embedding_layer = self.model.embedding_model.model.model.embed_tokens
         for p in embedding_layer.parameters():
             p.requires_grad = True
         hook = embedding_layer.register_full_backward_hook(hook_layers)
@@ -351,27 +278,8 @@ class Agent:
             attention_mask = output['attention_mask'].to(self.device)
             target = torch.FloatTensor(target).to(self.device)
 
-            agg_embed = []
-            num_chunks = 1 + (self.args.max_seq_len - self.args.chunk_size) / self.args.chunk_stride
-            for i in range(num_chunks):
-                start = i * (self.args.chunk_size - self.args.chunk_stride)
-                end = start + self.args.chunk_size
-                chunked_input_ids = input_ids[:, start:end]
-                chunked_attention_mask = attention_mask[:, start:end]
-                output = self.model(input_ids=chunked_input_ids, attention_mask=chunked_attention_mask, output_hidden_states=True)
-                last_hidden_state = output.hidden_states[-1]
-                if self.args.encoder:
-                    embeds = last_hidden_state.sum(dim=1) / chunked_attention_mask.sum(dim=-1, keepdim=True).clamp(min=1)
-                else:
-                    assert self.tokenizer.padding_side == 'left'
-                    last_tok_idx = (chunked_attention_mask.sum(dim=1) - 1).clamp(min=0)
-                    embeds = last_hidden_state[torch.arange(last_hidden_state.shape[0]), last_tok_idx]
-                agg_embed.append(embeds)
-
-            # combine embeddings
-            agg_embed = torch.cat(agg_embed, dim=1)
-            output = self.dropout(agg_embed)
-            output = self.classifier(agg_embed.to(self.classifier.weight.dtype))
+            self.optimizer.zero_grad()
+            output = self.model.forward(input_ids=input_ids, attention_mask=attention_mask)
 
             prob = torch.sigmoid(output).detach().cpu()
             pred = prob.round()
