@@ -105,25 +105,28 @@ def evaluate_with_thresholds(test_df, best_thresholds):
 
     return f1_scores, precision_scores, recall_scores
 
-def compute_baseline(test_df):
-
+def compute_baseline(train_df):
     baseline_metrics = {}
 
-    targets = np.reshape(np.concatenate(test_df["target"].to_numpy()), (-1, 3)).astype(int)
-    n_classes = targets.shape[1]
+    targets = np.reshape(np.concatenate(train_df["target"].to_numpy()), (-1, 3)).astype(int)
+    n_samples, n_classes = targets.shape
+
+    # Compute empirical label probabilities
+    label_probs = targets.mean(axis=0)
+
+    # Generate random predictions based on label frequencies
+    preds = np.random.binomial(n=1, p=label_probs, size=(n_samples, n_classes))
 
     for class_id in range(n_classes):
-        preds = np.ones(targets[:, class_id].shape)
-        f1 = f1_score(targets[:, class_id], preds, zero_division=0)
-        precision = precision_score(targets[:, class_id], preds, zero_division=0)
-        recall = recall_score(targets[:, class_id], preds, zero_division=0)
+        f1 = f1_score(targets[:, class_id], preds[:, class_id], zero_division=0)
+        precision = precision_score(targets[:, class_id], preds[:, class_id], zero_division=0)
+        recall = recall_score(targets[:, class_id], preds[:, class_id], zero_division=0)
         baseline_metrics[f'Class {class_id}'] = {
             'F1': f1,
             'Precision': precision,
             'Recall': recall
         }
-        
-    preds = np.ones(targets.shape)
+
     # macro
     macro_f1 = f1_score(targets, preds, average='macro', zero_division=0)
     macro_precision = precision_score(targets, preds, average='macro', zero_division=0)
@@ -133,6 +136,7 @@ def compute_baseline(test_df):
         'Precision': macro_precision,
         'Recall': macro_recall
     }
+
     # weighted
     weighted_f1 = f1_score(targets, preds, average='weighted', zero_division=0)
     weighted_precision = precision_score(targets, preds, average='weighted', zero_division=0)
@@ -142,5 +146,5 @@ def compute_baseline(test_df):
         'Precision': weighted_precision,
         'Recall': weighted_recall
     }
-    
+
     return baseline_metrics

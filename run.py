@@ -23,9 +23,9 @@ def main():
     parser.add_argument('--test', action='store_true', help='Run test dataset')
 
     # MODEL
-    parser.add_argument('--model', type=str, default="deepseek-ai/deepseek-coder-6.7b-base", help='Model name')
+    parser.add_argument('--model', type=str, default="microsoft/codebert-base", help='Model name')
     parser.add_argument('--encoder', action='store_true', help='Specify model is an encoder')
-    parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional attention')
+    # parser.add_argument('--bidirectional', action='store_true', help='Use bidirectional attention')
     parser.add_argument('--val_interval', type=int, default=1, help='Validation frequency')
     parser.add_argument('--ft_layers', type=int, default=0, help='Number of layers to fine-tune')
 
@@ -97,12 +97,12 @@ def train(args):
         "encoder": args.encoder,
         "requirements": args.requirements,
         "trim": args.trim,
-        "bidirectional": args.bidirectional,
         "only_jiong": args.only_jiong,
         "chunk_size": args.chunk_size,
         "chunk_stride": args.chunk_stride,
         "lr_clf": args.lr_clf,
         "dropout": args.dropout,
+        "ft_layers": args.ft_layers,
     }
 
     a = Agent(args)
@@ -130,7 +130,7 @@ def evaluate(args):
     print("Baseline performance metrics:")
     baseline_metrics = compute_baseline(test_df)
     for class_id, metrics in baseline_metrics.items():
-        print(f"{class_id}: F1: {metrics['F1']:.2f}, Precision: {metrics['Precision']:.2f}, Recall: {metrics['Recall']:.2f}")
+        print(f"{class_id}: F1: {metrics['F1']:.3f}, Precision: {metrics['Precision']:.3f}, Recall: {metrics['Recall']:.3f}")
     
     print(compute_roc_auc_table(test_df).round(3))
     print(compute_pr_auc_table(test_df).round(3))

@@ -19,8 +19,13 @@ from transformers import (
 )
 
 from dataset import HEDataset
+from baselines import (
+    BagOfWordsModel,
+    TfIdfModel,
+    Word2VecModel,
+)
 from models import (
-    EmbeddingClassifier,
+    FeatureClassifier,
     LayerFTModel,
     LoRAModel,
 )
@@ -57,7 +62,12 @@ class Agent:
         ''' Initialize tokenizer and base model.
             Load the adapter, optimizer, scheduler, dataset and training stats '''
 
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True, trust_remote_code=True)
+        except Exception as e:
+            print(f"Could not load tokenizer from {args.model}, defaulting to codebert-base")
+            self.tokenizer = AutoTokenizer.from_pretrained("microsoft/codebert-base", use_fast=True, trust_remote_code=True)
+
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
@@ -70,15 +80,27 @@ class Agent:
         self.train_loader = DataLoader(self.train_dataset, batch_size=args.batch_size, shuffle=True, pin_memory=True)
         self.val_loader = DataLoader(self.val_dataset, batch_size=args.batch_size, shuffle=False, pin_memory=True)
 
-        if self.args.ft_layers > 0:
+        if self.args.model == 'bow':
+            embedder_class = BagOfWordsModel
+        elif self.args.model == 'tfidf':
+            embedder_class = TfIdfModel
+        elif self.args.model == 'word2vec':
+            embedder_class = Word2VecModel
+        elif self.args.ft_layers > 0:
             embedder_class = LayerFTModel
         else:
             embedder_class = LoRAModel
-        self.model = EmbeddingClassifier(embedder_class, self.tokenizer, args)
+
+        self.model = FeatureClassifier(
+                embedder_class=embedder_class,
+                tokenizer=self.tokenizer,
+                train_dataset=self.train_dataset,
+                args=args,
+        )
 
         self.optimizer = torch.optim.AdamW([
             {
-                'params': list(self.model.embedding_model.parameters()),
+                'params': list(self.model.feature_extractor.parameters()),
                 'lr': args.lr
              },
             {   'params': list(self.model.classifier.parameters()),
@@ -151,12 +173,9 @@ class Agent:
         tqdm_batch = tqdm(self.train_loader, total=len(self.train_loader), desc=f'Train [Epoch {self.epoch}]')
         for batch in tqdm_batch:
             target = batch['target'].to(self.device)
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
-
             self.optimizer.zero_grad()
 
-            output = self.model.forward(input_ids=input_ids, attention_mask=attention_mask)
+            output = self.model.forward(batch)
             # convert logits to probabilities
             preds = torch.sigmoid(output).round()
             # the defect is predicted if probability >= 50%
@@ -196,14 +215,9 @@ class Agent:
 
         tqdm_batch = tqdm(self.val_loader, total=len(self.val_loader), desc='Val')
         for batch in tqdm_batch:
-            target = batch['target'].to(self.device)
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
-            
-            output = self.model.forward(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
+            target = batch['target'].to(self.device)\
+
+            output = self.model.forward(batch)
             
             # convert logits to probabilities
             preds = torch.sigmoid(output).round()
@@ -273,13 +287,12 @@ class Agent:
             for l in df.loc[i, 'label']:
                 target[l] = 1
 
-            output = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
-            input_ids = output['input_ids'].to(self.device)
-            attention_mask = output['attention_mask'].to(self.device)
+            batch = self.tokenizer(text, padding='max_length', max_length=self.args.max_seq_len, truncation=True, return_tensors='pt')
             target = torch.FloatTensor(target).to(self.device)
+            batch['target'] = target
 
             self.optimizer.zero_grad()
-            output = self.model.forward(input_ids=input_ids, attention_mask=attention_mask)
+            output = self.model.forward(batch)
 
             prob = torch.sigmoid(output).detach().cpu()
             pred = prob.round()
@@ -288,14 +301,14 @@ class Agent:
                 loss = self.compute_loss_multilabel(output.squeeze(0), target)
                 loss.backward()
 
-            all_input_ids.append(input_ids)
+            all_input_ids.append(batch['input_ids'].detach().cpu().numpy())
             all_targets.append(target.detach().cpu().numpy())
             all_preds.append(pred.numpy())
             all_probs.append(prob.numpy())
         df['text_tokenized'] = [self.tokenizer.tokenize(self.tokenizer.decode(input_ids[0])) for input_ids in all_input_ids]
         df['target'] = all_targets
         df['pred'] = all_preds
-        df['prob'] = all_probs        
+        df['prob'] = all_probs
 
         target_names = list(self.train_dataset.label_dict.values())
         report = classification_report(all_targets, np.concatenate(all_preds), target_names=target_names, zero_division=0)

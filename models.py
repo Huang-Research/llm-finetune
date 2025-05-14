@@ -14,11 +14,25 @@ from peft import (
     prepare_model_for_kbit_training,
 )
 
-class EmbeddingModel(nn.Module):
-    def __init__(self, tokenizer, args):
+class FeatureExtractor(nn.Module):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.tokenizer = tokenizer
-        self.args = args
+        self.args = kwargs['args']
+        self.tokenizer = kwargs['tokenizer']
+        self.device = self.args.device if self.args.device != 'auto' else 'cuda'
+
+    def load(self, path):
+        pass
+    
+    def save(self, path):
+        pass
+
+    def forward(self, batch):
+        raise NotImplementedError()
+
+class EmbeddingModel(FeatureExtractor):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
         quant_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -26,14 +40,14 @@ class EmbeddingModel(nn.Module):
             bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
             # TODO: the classification head should be separate from the base model
-            llm_int8_skip_modules=["classifier", "pre_classifier"] if args.model.find('codebert') != -1 else None,
+            llm_int8_skip_modules=["classifier", "pre_classifier"] if self.args.model.find('codebert') != -1 else None,
         )
 
         # load pretrained model
-        model_class = AutoModel if args.encoder else AutoModelForCausalLM
+        model_class = AutoModel if self.args.encoder else AutoModelForCausalLM
         self.model = model_class.from_pretrained(
-            args.model,
-            device_map=args.device,
+            self.args.model,
+            device_map=self.args.device,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
             revision="main",
@@ -54,7 +68,9 @@ class EmbeddingModel(nn.Module):
     def save(self, path):
         torch.save(self.model.state_dict(), f'{path}/model.pt')
 
-    def forward(self, input_ids, attention_mask):
+    def forward(self, batch):
+        input_ids = batch['input_ids'].to(self.model.device)
+        attention_mask = batch['attention_mask'].to(self.model.device)
         window_embeds = []
         for i in range(self.num_chunks):
             start = i * self.args.chunk_stride
@@ -133,31 +149,33 @@ class ClassificationHead(nn.Module):
     def save(self, path):
         torch.save(self.classifier.state_dict(), f'{path}/classifier.pt')
 
-    def forward(self, input):
-        output = self.dropout(input)
-        logits = self.classifier(output.to(self.classifier.weight.dtype))
+    def forward(self, embeds):
+        embeds = self.dropout(embeds)
+        logits = self.classifier(embeds.to(self.classifier.weight.dtype))
         return logits
 
-class EmbeddingClassifier(nn.Module):
-    def __init__(self, embedder_class, tokenizer, args):
+class FeatureClassifier(nn.Module):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.args = args
-        self.embedding_model = embedder_class(tokenizer=tokenizer, args=args)
-        self.classifier = ClassificationHead(args,
-            d_in=self.embedding_model.embed_dim,
-            d_out=len(args.classes)
-        ).to(self.embedding_model.model.device)
+        self.args = kwargs['args']
+        self.device = self.args.device if self.args.device != 'auto' else 'cuda'
+        embedder_class = kwargs.pop('embedder_class')
+        self.feature_extractor = embedder_class(**kwargs)
+        self.classifier = ClassificationHead(self.args,
+            d_in=self.feature_extractor.embed_dim,
+            d_out=len(self.args.classes)
+        ).to(self.device)
 
     def load(self, path):
-        self.embedding_model.load(path)
+        self.feature_extractor.load(path)
         self.classifier.load(path)
-        self.classifier = self.classifier.to(self.embedding_model.model.device)
+        self.classifier = self.classifier.to(self.device)
 
     def save(self, path):
-        self.embedding_model.save(path)
+        self.feature_extractor.save(path)
         self.classifier.save(path)
 
-    def forward(self, input_ids, attention_mask):
-        embedding = self.embedding_model(input_ids, attention_mask)
-        logits = self.classifier(embedding)
+    def forward(self, batch):
+        embeds = self.feature_extractor(batch)
+        logits = self.classifier(embeds)
         return logits

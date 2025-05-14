@@ -9,7 +9,7 @@ error  = .condor_logs/$(Cluster).$(Process).err
 log    = .condor_logs/$(Cluster).$(Process).log
 +CSCI_GrpDesktop = true
 
-+JobBatchName = "lr_clf sweep deepseek1.3"
++JobBatchName = "codebert"
 
 arguments = $(args)
 Queue arguments from args.txt

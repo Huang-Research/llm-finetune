@@ -32,10 +32,6 @@ class HEDataset(Dataset):
         df = df[df['split'] == self.split]
         # remap to be contiguous
         df['label'] = df['label'].apply(lambda x: [np.arange(self.num_classes)[l] for l in x if l in label_incl])
-        return df
-
-    def load_data(self, df):
-        data = []
 
         self.label_dict = {
             i: label for i, label in enumerate(self.classes)
@@ -60,16 +56,21 @@ f"""#Find the defects in the code, given the following requirements
         # append eos as classification token
         df['text'] = df['text'].apply(lambda x: x + self.tokenizer.eos_token)
 
-        output = self.tokenizer(df['text'].to_list(), padding='max_length', max_length=self.max_length, truncation=True, return_tensors='pt')
-        input_ids = output['input_ids']
-        att_mask = output['attention_mask']
-
         label_counts = df['label'].explode().value_counts().sort_index()
         label_counts /= label_counts.sum()
         self.wts = torch.FloatTensor(label_counts.to_list())
         # self.wts = (label_counts.sum() - self.wts) / self.wts
         self.wts = 1 / self.wts
         print(f'Label counts: {label_counts.to_list()}')
+
+        return df
+
+    def load_data(self, df):
+        data = []
+
+        output = self.tokenizer(df['text'].to_list(), padding='max_length', max_length=self.max_length, truncation=True, return_tensors='pt')
+        input_ids = output['input_ids']
+        att_mask = output['attention_mask']
 
         for i in range(len(df)):
             target = torch.zeros(self.num_classes)
